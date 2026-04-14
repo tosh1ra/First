@@ -1,197 +1,114 @@
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
+import plotly.graph_objects as go
+import plotly.express as px
 from sklearn.datasets import fetch_california_housing
 from sklearn.ensemble import RandomForestRegressor
-import shap
+
+# Настройка страницы
+st.set_page_config(page_title="Pro House AI", layout="wide")
 
 # ---------------------------
-# DARK THEME (custom CSS)
-# ---------------------------
-st.set_page_config(page_title="🏠 House Price AI", layout="wide")
-
-st.markdown("""
-<style>
-body {
-    background-color: #0e1117;
-    color: white;
-}
-.stMetric {
-    background-color: #1c1f26;
-    padding: 15px;
-    border-radius: 10px;
-}
-</style>
-""", unsafe_allow_html=True)
-
-st.title("🏠 AI House Price Predictor")
-st.markdown("### Smart real estate valuation powered by Machine Learning")
-
-# ---------------------------
-# LOAD DATA
+# ЗАГРУЗКА И МОДЕЛЬ (Максимальное ускорение)
 # ---------------------------
 @st.cache_data
-def load_data():
+def get_data():
     housing = fetch_california_housing()
     X = pd.DataFrame(housing.data, columns=housing.feature_names)
     y = pd.Series(housing.target, name="PRICE")
     return X, y
 
-X, y = load_data()
-
-# ---------------------------
-# MODEL
-# ---------------------------
 @st.cache_resource
-def train_model():
-    model = RandomForestRegressor(n_estimators=150)
-    model.fit(X, y)
+def train_fast_model(_X, _y):
+    # n_jobs=-1 использует все ядра процессора для мгновенного обучения
+    model = RandomForestRegressor(n_estimators=50, n_jobs=-1, random_state=42)
+    model.fit(_X, _y)
     return model
 
-model = train_model()
+X, y = get_data()
+model = train_fast_model(X, y)
 
 # ---------------------------
-# SIDEBAR
+# БОКОВАЯ ПАНЕЛЬ
 # ---------------------------
-st.sidebar.title("⚙️ Customize House")
-
-def user_input():
-    data = {}
+st.sidebar.header("⚙️ Параметры дома")
+def get_user_input():
+    inputs = {}
+    stats = X.describe()
     for col in X.columns:
-        avg = float(X[col].mean())
+        inputs[col] = st.sidebar.slider(col, float(stats.loc['min', col]), 
+                                        float(stats.loc['max', col]), float(stats.loc['mean', col]))
+    return pd.DataFrame(inputs, index=[0])
 
-        data[col] = st.sidebar.slider(
-            col,
-            float(X[col].min()),
-            float(X[col].max()),
-            avg
-        )
-
-        st.sidebar.caption(f"Avg: {avg:.2f}")  # <-- добавили среднее
-
-    return pd.DataFrame(data, index=[0])
-
-df = user_input()
-
-prediction = model.predict(df)[0]
-price = prediction * 100000
+user_df = get_user_input()
+pred_raw = model.predict(user_df)[0]
+price = pred_raw * 100000
+avg_price = y.mean() * 100000
 
 # ---------------------------
-# METRICS
+# ГЛАВНЫЙ ИНТЕРФЕЙС
 # ---------------------------
-col1, col2, col3 = st.columns(3)
+st.title("🏠 AI Real Estate Pro")
 
-col1.metric("💰 Predicted Price", f"${price:,.0f}")
-col2.metric("📊 Dataset Avg", f"${y.mean()*100000:,.0f}")
-col3.metric("📈 Difference", f"${price - y.mean()*100000:,.0f}")
+# 1. СПИДОМЕТР (Gauge Chart) вместо скучных цифр
+fig_gauge = go.Figure(go.Indicator(
+    mode = "gauge+number+delta",
+    value = price,
+    domain = {'x': [0, 1], 'y': [0, 1]},
+    title = {'text': "Прогноз стоимости ($)"},
+    delta = {'reference': avg_price, 'increasing': {'color': "red"}, 'decreasing': {'color': "green"}},
+    gauge = {
+        'axis': {'range': [None, y.max()*100000]},
+        'bar': {'color': "#1f77b4"},
+        'steps': [
+            {'range': [0, avg_price], 'color': "lightgray"},
+            {'range': [avg_price, y.max()*100000], 'color': "gray"}],
+        'threshold': {'line': {'color': "red", 'width': 4}, 'thickness': 0.75, 'value': price}
+    }
+))
+fig_gauge.update_layout(height=350, margin=dict(t=0, b=0))
+st.plotly_chart(fig_gauge, use_container_width=True)
 
 st.divider()
 
-# ---------------------------
-# TABS
-# ---------------------------
-tab1, tab2, tab3, tab4 = st.tabs(["📥 Input", "📊 Analytics", "🗺️ Map", "🧠 Model"])
+tab1, tab2, tab3 = st.tabs(["📍 Карта цен", "🔍 Анализ факторов", "📊 Сравнение"])
 
-# ---------------------------
-# TAB 1
-# ---------------------------
+# 2. ИНТЕРАКТИВНАЯ КАРТА (Цвет = Цена)
 with tab1:
-    st.subheader("Your House Parameters")
-    st.dataframe(df.style.background_gradient(cmap="Blues"))
+    st.subheader("Где находятся дорогие дома?")
+    map_df = X.sample(1500).copy()
+    map_df['Price'] = y[map_df.index] * 100000
+    # Используем plotly для цветных точек
+    fig_map = px.scatter_mapbox(map_df, lat="Latitude", lon="Longitude", color="Price",
+                                size="Price", color_continuous_scale=px.colors.cyclical.IceFire, 
+                                size_max=10, zoom=5, mapbox_style="carto-positron")
+    fig_map.update_layout(margin=dict(l=0, r=0, t=0, b=0))
+    st.plotly_chart(fig_map, use_container_width=True)
 
-# ---------------------------
-# TAB 2
-# ---------------------------
+# 3. ОБЪЯСНЕНИЕ ЦЕНЫ (Почему такая цена?)
 with tab2:
-    colA, colB = st.columns(2)
+    col_a, col_b = st.columns([1, 2])
+    with col_a:
+        st.subheader("Логика ИИ")
+        # Простая имитация SHAP: объясняем влияние главного фактора
+        main_feat = "MedInc" # Доход населения - главный фактор в этом датасете
+        val = user_df[main_feat][0]
+        if val > X[main_feat].mean():
+            st.success(f"✅ Цена выше средней, так как доход в районе ({val:.2f}) выше нормы.")
+        else:
+            st.warning(f"⚠️ Цена ниже, так как показатель дохода ({val:.2f}) невысок.")
+    
+    with col_b:
+        st.subheader("Важность параметров")
+        feat_imp = pd.DataFrame({'Feature': X.columns, 'Importance': model.feature_importances_}).sort_values('Importance')
+        st.bar_chart(feat_imp.set_index('Feature'))
 
-    with colA:
-        st.subheader("Price Distribution")
-        fig, ax = plt.subplots()
-        ax.hist(y, bins=30)
-        ax.axvline(prediction, linestyle="--")
-        st.pyplot(fig)
-
-    with colB:
-        st.subheader("Feature Importance")
-        importance = pd.DataFrame({
-            "Feature": X.columns,
-            "Importance": model.feature_importances_
-        }).sort_values(by="Importance", ascending=True)
-
-        fig2, ax2 = plt.subplots()
-        ax2.barh(importance["Feature"], importance["Importance"])
-        st.pyplot(fig2)
-
-    # ---------------------------
-    # SHAP
-    # ---------------------------
-    st.subheader("🔍 Why this price?")
-    explainer = shap.TreeExplainer(model)
-    shap_values = explainer.shap_values(df)
-
-    fig_shap = shap.force_plot(
-        explainer.expected_value,
-        shap_values[0],
-        df,
-        matplotlib=True
-    )
-
-    st.pyplot(fig_shap)
-
-# ---------------------------
-# TAB 3
-# ---------------------------
+# 4. БЫСТРОЕ СРАВНЕНИЕ
 with tab3:
-    st.subheader("Geographic Visualization")
+    st.subheader("Ваш выбор vs Среднее по рынку")
+    comparison = pd.concat([user_df.T, X.mean().to_frame()], axis=1)
+    comparison.columns = ['Ваш дом', 'Среднее']
+    st.table(comparison.style.highlight_max(axis=1, color='lightgreen'))
 
-    map_data = X.copy()
-    map_data["price"] = y
-
-    st.map(map_data.rename(columns={
-        "Latitude": "lat",
-        "Longitude": "lon"
-    }))
-
-# ---------------------------
-# TAB 4
-# ---------------------------
-with tab4:
-    st.subheader("Model Explanation")
-
-    st.write("""
-    This model uses **Random Forest Regression**.
-
-    ✔ Combines multiple decision trees  
-    ✔ Captures complex relationships  
-    ✔ Works well for real estate data  
-    """)
-
-    st.subheader("Correlation Matrix")
-
-    corr = X.corr()
-    fig3, ax3 = plt.subplots()
-    cax = ax3.matshow(corr)
-    plt.xticks(range(len(corr.columns)), corr.columns, rotation=90)
-    plt.yticks(range(len(corr.columns)), corr.columns)
-    fig3.colorbar(cax)
-
-    st.pyplot(fig3)
-
-# ---------------------------
-# BEAUTIFUL COMPARISON
-# ---------------------------
-st.divider()
-st.subheader("📊 Compare Your House to Dataset")
-
-comparison = pd.DataFrame({
-    "Your House": df.iloc[0],
-    "Average": X.mean()
-})
-
-# нормализация для красоты
-comparison_norm = comparison / comparison.max()
-
-st.line_chart(comparison_norm.T)
-st.dataframe(comparison.style.background_gradient(cmap="coolwarm"))
+st.caption("Данные: California Housing Dataset. Обучено мгновенно с использованием RandomForest(n_jobs=-1).")
