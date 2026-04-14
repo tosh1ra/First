@@ -1,10 +1,15 @@
 import streamlit as st
-import pandas as pd
 from sklearn.datasets import fetch_california_housing
+import pandas as pd
 
-st.title('Hello World!')
+st.title('My first project')
+st.markdown("### Smart real estate valuation powered by Machine Learning")
 
-st.markdown('### AI')
-@st.cashe_data
+@st.cache_data
+def load_data():
+    housing = fetch_california_housing()
+    X = pd.DataFrame(housing.data, columns=housing.feature_names)
+    y = pd.Series(housing.target, name="PRICE")
+    return X, y
 
-data = fetch_california_housing()
+X, y = load_data()
